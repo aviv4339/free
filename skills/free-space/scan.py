@@ -42,7 +42,9 @@ CATALOG = [
     {"label": "iOS Simulators", "paths": ["~/Library/Developer/CoreSimulator"],
      "category": "Developer", "safety": "review",
      "why": "Simulator runtimes and devices. Old/unavailable ones are pure waste.",
-     "reclaim": "xcrun simctl delete unavailable"},
+     "reclaim": "xcrun simctl delete unavailable",
+     "tip": "In Xcode → Settings → Platforms you can remove old simulator runtimes; "
+            "the command clears devices left behind by runtimes you deleted."},
     {"label": "Xcode Archives", "paths": ["~/Library/Developer/Xcode/Archives"],
      "category": "Developer", "safety": "review",
      "why": "Archived app builds. You may need these to re-submit or symbolicate crashes.",
@@ -97,13 +99,17 @@ CATALOG = [
     {"label": "Docker data", "paths": ["~/Library/Containers/com.docker.docker/Data"],
      "category": "Developer", "safety": "review",
      "why": "Docker's disk image (images, volumes, build cache). Can grow to tens of GB.",
-     "reclaim": "docker system prune -a --volumes"},
+     "reclaim": "docker system prune -a --volumes",
+     "tip": "Run `docker system df` first to see the images / volumes / build-cache split, "
+            "then prune only what you don't need. --volumes also deletes database data."},
 
     # General macOS junk
     {"label": "User caches", "paths": ["~/Library/Caches"],
      "category": "System", "safety": "safe",
      "why": "Per-app caches. Apps regenerate what they need; safe to clear when apps are closed.",
-     "reclaim": None},
+     "reclaim": None,
+     "tip": "Everything here is rebuildable. Emptying ~/Library/Caches with apps quit is safe; "
+            "the OS and apps refill only what they actually use."},
     {"label": "User logs", "paths": ["~/Library/Logs"],
      "category": "System", "safety": "safe",
      "why": "Application and diagnostic logs.", "reclaim": None},
@@ -115,17 +121,23 @@ CATALOG = [
     # User data — review before touching
     {"label": "Downloads", "paths": ["~/Downloads"],
      "category": "Personal", "safety": "review",
-     "why": "Often full of installers and one-off files you no longer need.", "reclaim": None},
+     "why": "Often full of installers and one-off files you no longer need.", "reclaim": None,
+     "tip": "Sort by size in Finder and clear old .dmg / .pkg / .zip installers — "
+            "you can always download them again."},
     {"label": "iOS device backups", "paths": ["~/Library/Application Support/MobileSync/Backup"],
      "category": "Personal", "safety": "review",
      "why": "Local iPhone/iPad backups. Big, and possibly your only backup — check before deleting.",
-     "reclaim": None},
+     "reclaim": None,
+     "tip": "Each folder is one device backup. Prefer Finder → Manage Backups so you keep the "
+            "most recent one; deleting here is irreversible."},
 
     # App data — handle with care
     {"label": "Photos library", "paths": ["~/Pictures/Photos Library.photoslibrary"],
      "category": "Personal", "safety": "caution",
      "why": "Your photo library. Turn on iCloud Photos → Optimize Mac Storage instead of deleting.",
-     "reclaim": None},
+     "reclaim": None,
+     "tip": "Don't delete this. In Photos → Settings → iCloud, enable 'Optimize Mac Storage' to "
+            "keep full-res originals in iCloud and light previews on disk."},
     {"label": "Mail", "paths": ["~/Library/Mail"],
      "category": "Personal", "safety": "caution",
      "why": "Downloaded mail and attachments. Manage from Mail, not the Finder.", "reclaim": None},
@@ -135,10 +147,14 @@ CATALOG = [
     {"label": "Application Support", "paths": ["~/Library/Application Support"],
      "category": "System", "safety": "caution",
      "why": "Working data for installed apps. Deleting blindly breaks apps — prune per-app.",
-     "reclaim": None},
+     "reclaim": None,
+     "tip": "The biggest folders below are usually AI model stores (Ollama, LM Studio), "
+            "chat-app media, or VM images. Remove each from within its app, not the Finder."},
     {"label": "App containers", "paths": ["~/Library/Containers", "~/Library/Group Containers"],
      "category": "System", "safety": "caution",
-     "why": "Sandboxed app data (Messages, Mail attachments, etc.). Prune per-app.", "reclaim": None},
+     "why": "Sandboxed app data (Messages, Mail attachments, etc.). Prune per-app.", "reclaim": None,
+     "tip": "Each folder is one sandboxed app (by bundle id). Clearing an app's cache from "
+            "inside the app is safe; deleting its container resets that app's data."},
 ]
 
 SAFETY_ORDER = {"safe": 0, "review": 1, "caution": 2}
@@ -261,6 +277,36 @@ def cap_breakdown(items, n=28):
                          "bytes": sum(i["bytes"] for i in tail)}]
 
 
+def top_children(paths, kids, limit=8):
+    """Immediate children of a hotspot's resolved paths, biggest first — the
+    drill-down. Directory sizes come free from the du walk (`kids` index); files
+    (which du omits) come from one shallow, non-recursive scandir per path. No
+    extra recursive scanning, so this is nearly free.
+
+    Returns (top_children, more) where `more` sums the tail beyond `limit`.
+    """
+    items = {}  # name -> bytes, merged across the entry's resolved paths
+    for p in paths:
+        for name, b in kids.get(p, []):          # dirs, already measured
+            items[name] = items.get(name, 0) + b
+        try:                                      # top-level files, cheap listing
+            with os.scandir(p) as it:
+                for e in it:
+                    if e.is_file(follow_symlinks=False):
+                        try:  # st_blocks is 512-byte units → allocated size, like du
+                            items[e.name] = items.get(e.name, 0) + \
+                                e.stat(follow_symlinks=False).st_blocks * 512
+                        except OSError:
+                            pass
+        except OSError:  # missing / permission-denied (TCC) — dirs still show
+            pass
+    ranked = sorted(({"name": n, "bytes": b} for n, b in items.items() if b > 0),
+                    key=lambda c: c["bytes"], reverse=True)
+    more = ({"count": len(ranked) - limit, "bytes": sum(c["bytes"] for c in ranked[limit:])}
+            if len(ranked) > limit else None)
+    return ranked[:limit], more
+
+
 def scan(home, depth, broad_timeout, target_timeout, fast):
     started = datetime.now()
     errors = []
@@ -282,6 +328,12 @@ def scan(home, depth, broad_timeout, target_timeout, fast):
     breakdown.sort(key=lambda d: d["bytes"], reverse=True)
     breakdown = cap_breakdown(breakdown)
 
+    # Index every directory by its parent, once, so each hotspot's drill-down is
+    # a dict lookup instead of a rescan.
+    kids = {}
+    for path, size in tree.items():
+        kids.setdefault(os.path.dirname(path), []).append((os.path.basename(path), size))
+
     # Catalog hotspots. A catalog entry's paths are distinct locations of the
     # same junk (e.g. Homebrew cache in ~/Library and /opt/homebrew) — sum them.
     hotspots = []
@@ -294,10 +346,12 @@ def scan(home, depth, broad_timeout, target_timeout, fast):
                 paths_found += found
         if not paths_found or total < KB * KB:  # skip missing / negligible (<1 MB)
             continue
+        children, more = ([], None) if fast else top_children(paths_found, kids)
         hotspots.append({
             "label": entry["label"], "bytes": total, "paths": paths_found,
             "category": entry["category"], "safety": entry["safety"],
-            "why": entry["why"], "reclaim": entry["reclaim"],
+            "why": entry["why"], "reclaim": entry["reclaim"], "tip": entry.get("tip"),
+            "children": children, "children_more": more,
         })
     hotspots.sort(key=lambda h: (SAFETY_ORDER[h["safety"]], -h["bytes"]))
 
@@ -413,7 +467,7 @@ header{display:flex;justify-content:space-between;align-items:flex-start;gap:16p
   border-radius:999px;padding:6px 14px;cursor:pointer;font-size:13px}
 .filters button[aria-pressed=true]{background:var(--accent);color:#fff;border-color:var(--accent)}
 /* hotspot cards */
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;align-items:start}
 .card{padding:16px 18px;border-left:4px solid var(--line)}
 .card[data-safety=safe]{border-left-color:var(--safe)}
 .card[data-safety=review]{border-left-color:var(--review)}
@@ -435,6 +489,26 @@ header{display:flex;justify-content:space-between;align-items:flex-start;gap:16p
 .cmd code{font-size:12px;overflow-x:auto;white-space:nowrap;flex:1}
 .cmd button{border:1px solid var(--line);background:var(--panel);color:var(--muted);
   border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;white-space:nowrap}
+/* drill-down */
+.drill{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
+.drill>summary{cursor:pointer;list-style:none;font-size:12px;font-weight:600;color:var(--accent);
+  display:flex;align-items:center;gap:6px;user-select:none}
+.drill>summary::-webkit-details-marker{display:none}
+.drill>summary::before{content:"▸";font-size:10px;transition:transform .15s}
+.drill[open]>summary::before{transform:rotate(90deg)}
+.drill-body{margin-top:10px}
+.paths{font-size:11px;color:var(--muted);word-break:break-all;margin-bottom:10px}
+.children{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.children li{display:grid;grid-template-columns:minmax(0,1fr) 84px auto;align-items:center;
+  gap:8px;font-size:12px}
+.children .cn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.children .cbar{height:6px;background:var(--line);border-radius:3px;overflow:hidden}
+.children .cbar i{display:block;height:100%;background:var(--accent);opacity:.85;border-radius:3px}
+.children .cs{font-variant-numeric:tabular-nums;color:var(--muted);white-space:nowrap;text-align:right}
+.cmore{font-size:11px;color:var(--muted);margin-top:8px}
+.tip{font-size:12px;line-height:1.45;color:var(--ink);margin:10px 0 0;padding:8px 10px;
+  border-radius:8px;background:color-mix(in srgb,var(--accent) 8%,var(--panel));
+  border:1px solid color-mix(in srgb,var(--accent) 22%,var(--line))}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
 th:last-child,td:last-child{text-align:right;font-variant-numeric:tabular-nums}
@@ -590,6 +664,24 @@ def render_html(d):
         if h["reclaim"]:
             p.append(f'<div class="cmd"><code>{esc(h["reclaim"])}</code>'
                      f'<button data-cmd="{esc(h["reclaim"])}">Copy</button></div>')
+        if h.get("children"):
+            cmax = max(c["bytes"] for c in h["children"])
+            paths_disp = " · ".join(esc(pp.replace(d["home"], "~")) for pp in h["paths"])
+            p.append('<details class="drill"><summary>What\'s inside</summary>'
+                     '<div class="drill-body">')
+            p.append(f'<div class="paths mono">{paths_disp}</div><ul class="children">')
+            for c in h["children"]:
+                w = c["bytes"] / cmax * 100
+                p.append(f'<li><span class="cn mono">{esc(c["name"])}</span>'
+                         f'<span class="cbar"><i style="width:{w:.1f}%"></i></span>'
+                         f'<span class="cs">{human(c["bytes"])}</span></li>')
+            p.append("</ul>")
+            if h.get("children_more"):
+                m = h["children_more"]
+                p.append(f'<div class="cmore">+{m["count"]} more · {human(m["bytes"])}</div>')
+            if h.get("tip"):
+                p.append(f'<p class="tip">💡 {esc(h["tip"])}</p>')
+            p.append("</div></details>")
         p.append("</div>")
     p.append("</div>")
 
@@ -690,6 +782,18 @@ def selftest():
         assert b == 4096 * KB and found == [real], (b, found)
         assert size_of(os.path.join(real, "nope-xyzzy"), {}, 5) == (None, [])
 
+    # top_children: dir sizes come from the kids index; the tail rolls into `more`
+    kids = {"/h/App": [("Big", 900 * KB), ("Mid", 300 * KB), ("Small", 100 * KB)]}
+    top, more = top_children(["/h/App"], kids, limit=2)
+    assert [c["name"] for c in top] == ["Big", "Mid"], top
+    assert more == {"count": 1, "bytes": 100 * KB}
+    assert top_children(["/nope/xyzzy"], {}, limit=8) == ([], None)  # missing path, no crash
+    with tempfile.TemporaryDirectory() as td2:  # scandir surfaces files du omits
+        with open(os.path.join(td2, "blob.bin"), "wb") as fh:
+            fh.write(b"\0" * 300_000)
+        tchild, _ = top_children([os.path.abspath(td2)], {}, limit=8)
+        assert any(c["name"] == "blob.bin" and c["bytes"] > 0 for c in tchild), tchild
+
     # render_html must not throw and must embed the data island
     sample = {
         "generated_at": "2026-07-13 20:00", "generated_iso": "2026-07-13T20:00:00",
@@ -699,7 +803,9 @@ def selftest():
                       {"name": "a", "path": "/h/a", "bytes": 2048 * KB}],
         "hotspots": [{"label": "Trash", "bytes": 2048 * KB, "paths": ["/h/.Trash"],
                       "category": "System", "safety": "safe", "why": "junk",
-                      "reclaim": "echo hi"}],
+                      "reclaim": "echo hi", "tip": "empty it",
+                      "children": [{"name": "old.dmg", "bytes": 2000 * KB}],
+                      "children_more": {"count": 3, "bytes": 48 * KB}}],
         "node_modules": nm, "node_modules_total": nm[0]["bytes"], "node_modules_count": 1,
         "reclaimable": 2048 * KB, "summary": {"safe": 2048 * KB, "review": 0, "caution": 0},
         "snapshots": 0,
@@ -708,6 +814,7 @@ def selftest():
     out = render_html(sample)
     assert out.startswith("<!doctype html>")
     assert 'id="report-data"' in out and "squarify" in out
+    assert 'class="drill"' in out and "old.dmg" in out and "+3 more" in out
 
     s = stdout_summary(sample, "x.html")
     assert s["report"] == "x.html"
