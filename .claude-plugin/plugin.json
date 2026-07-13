@@ -1,0 +1,13 @@
+{
+  "name": "free",
+  "version": "0.1.0",
+  "description": "Find what's eating your Mac's storage. Scans known macOS space hogs, explains what's safe to delete, and writes a beautiful interactive HTML report. Never deletes anything.",
+  "author": {
+    "name": "avive",
+    "url": "https://github.com/aviv4339"
+  },
+  "homepage": "https://github.com/aviv4339/free",
+  "repository": "https://github.com/aviv4339/free",
+  "license": "MIT",
+  "keywords": ["macos", "storage", "disk", "cleanup", "free-space", "du"]
+}

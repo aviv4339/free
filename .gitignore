@@ -1,0 +1,17 @@
+# Agent / session state (oh-my-claudecode)
+.omc/
+
+# Reports this plugin generates inside user projects
+storage-report/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Local tooling / browser automation
+.playwright-mcp/
+
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/

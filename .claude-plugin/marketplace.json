@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "free",
+  "description": "Find what's eating your Mac's storage — read-only scan plus an interactive report.",
+  "owner": {
+    "name": "avive",
+    "url": "https://github.com/aviv4339"
+  },
+  "plugins": [
+    {
+      "name": "free",
+      "description": "Map macOS storage hotspots, explain what's safe to delete, and generate a beautiful interactive HTML report. Never deletes anything.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
