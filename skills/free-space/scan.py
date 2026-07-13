@@ -19,6 +19,8 @@ import argparse
 import glob
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -252,6 +254,60 @@ def local_snapshots():
     return sum(1 for ln in out.splitlines() if "com.apple.TimeMachine" in ln)
 
 
+def parse_size(s):
+    """Docker's human sizes ('1.2GB', '500MB', '1.2GB (virtual 3.4GB)') -> bytes,
+    for ranking. Docker prints decimal units; exact base doesn't matter here."""
+    m = re.match(r"\s*([\d.]+)\s*([kKMGTP]?i?B)", str(s))
+    if not m:
+        return 0
+    mult = {"b": 1, "kb": 1e3, "mb": 1e6, "gb": 1e9, "tb": 1e12,
+            "kib": 2 ** 10, "mib": 2 ** 20, "gib": 2 ** 30, "tib": 2 ** 40}
+    return float(m.group(1)) * mult.get(m.group(2).lower(), 1)
+
+
+def _docker_json(args, timeout):
+    """Run a docker command with `--format {{json .}}`, one JSON object per line."""
+    out = run(["docker", *args, "--format", "{{json .}}"], timeout)
+    if out is None:
+        return None
+    rows = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line:
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                pass
+    return rows
+
+
+def docker_info(hotspots, timeout=20):
+    """Docker's own view of what's eating space — asked straight from the daemon.
+    None if docker isn't installed; a stub (running=False) if it's not started."""
+    if not shutil.which("docker"):
+        return None
+    on_disk = next((h["bytes"] for h in hotspots if h["label"] == "Docker data"), None)
+    df = _docker_json(["system", "df"], timeout)
+    if not df:  # binary present but daemon down / unreachable
+        return {"running": False, "on_disk": on_disk} if on_disk else None
+
+    def top(rows, name_of, limit=6):
+        for r in rows:
+            r["_b"] = parse_size(r.get("Size", "0"))
+        rows.sort(key=lambda r: r["_b"], reverse=True)
+        return [{**name_of(r), "size": r.get("Size", "")} for r in rows[:limit] if r["_b"] > 0]
+
+    images = _docker_json(["images"], timeout) or []
+    containers = _docker_json(["ps", "-a", "-s"], timeout) or []
+    return {
+        "running": True, "on_disk": on_disk, "summary": df,
+        "images": top(images, lambda r: {"name": f'{r.get("Repository", "")}:{r.get("Tag", "")}'}),
+        "containers": top(containers, lambda r: {"name": r.get("Names", ""),
+                                                 "image": r.get("Image", ""),
+                                                 "state": r.get("State", "")}),
+    }
+
+
 def find_node_modules(tree):
     """Top-level node_modules dirs from the du tree (nested ones excluded)."""
     out = []
@@ -363,6 +419,7 @@ def scan(home, depth, broad_timeout, target_timeout, fast):
         summary[h["safety"]] += h["bytes"]
 
     snap_count = local_snapshots()
+    docker = docker_info(hotspots)
 
     return {
         "generated_at": started.strftime("%Y-%m-%d %H:%M"),
@@ -379,6 +436,7 @@ def scan(home, depth, broad_timeout, target_timeout, fast):
         "reclaimable": summary["safe"],
         "summary": summary,
         "snapshots": snap_count,
+        "docker": docker,
         "scan": {"depth": depth, "duration_s": round((datetime.now() - started).total_seconds(), 1),
                  "timed_out": timed_out, "fast": fast, "errors": errors},
     }
@@ -459,6 +517,13 @@ header{display:flex;justify-content:space-between;align-items:flex-start;gap:16p
 .cell:hover{filter:brightness(1.08)}
 .cell .n{font-size:12px;font-weight:600}
 .cell .s{font-size:11px;opacity:.9}
+.cell .p{font-size:10px;opacity:.72;margin-top:3px;line-height:1.25;word-break:break-all;
+  font-family:ui-monospace,"SF Mono",Menlo,monospace}
+.tm-tip{position:fixed;z-index:20;pointer-events:none;display:flex;flex-direction:column;gap:2px;
+  background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;
+  padding:8px 11px;font-size:12px;box-shadow:var(--shadow);max-width:300px}
+.tm-tip b{font-weight:650}
+.tm-tip span{color:var(--muted);font-size:11px;word-break:break-all}
 .tm-list{list-style:none;margin:0;padding:14px 18px}
 .tm-list li{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--line)}
 /* filters */
@@ -516,6 +581,18 @@ th:last-child,td:last-child{text-align:right;font-variant-numeric:tabular-nums}
 .warn{background:color-mix(in srgb,var(--review) 12%,var(--panel));
   border:1px solid color-mix(in srgb,var(--review) 40%,var(--line))}
 .warn .panel-in{padding:14px 18px}
+/* docker section */
+.dk{padding:16px 18px}
+.dk .disk .path{font-size:11px;color:var(--muted)}
+.dk table{margin-top:12px}
+.dk-cols{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:16px}
+@media (max-width:620px){.dk-cols{grid-template-columns:1fr}}
+.dk h3{font-size:12px;margin:0 0 8px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.dklist{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.dklist li{display:flex;justify-content:space-between;gap:10px;font-size:13px;
+  border-bottom:1px solid var(--line);padding-bottom:7px}
+.dklist li small{display:block;color:var(--muted);font-size:11px;margin-top:1px}
+.dklist .sz{font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--muted)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 """
 
@@ -570,6 +647,21 @@ function squarify(items, W, H){
 }
 function fmt(n){ n=+n; const u=['B','KB','MB','GB','TB']; let k=0;
   while(n>=1024&&k<4){n/=1024;k++;} return (k<3?n.toFixed(0):n.toFixed(1))+' '+u[k]; }
+function esc(s){ return String(s).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
+function pctOfHome(b){ const p=DATA.home_total?b/DATA.home_total*100:0; return (p<10?p.toFixed(1):p.toFixed(0))+'%'; }
+const tmTip=document.createElement('div'); tmTip.className='tm-tip'; tmTip.style.display='none';
+document.body.appendChild(tmTip);
+function showTip(e,c){
+  const rel=c.path?c.path.replace(DATA.home,'~'):'';
+  tmTip.innerHTML='<b>'+esc(c.name)+'</b>'+(rel?'<span>'+esc(rel)+'</span>':'')
+    +'<span>'+fmt(c.bytes)+' · '+pctOfHome(c.bytes)+' of home</span>';
+  tmTip.style.display='flex';
+  const pad=14, r=tmTip.getBoundingClientRect();
+  let x=e.clientX+pad, y=e.clientY+pad;
+  if(x+r.width>innerWidth) x=e.clientX-r.width-pad;
+  if(y+r.height>innerHeight) y=e.clientY-r.height-pad;
+  tmTip.style.left=Math.max(4,x)+'px'; tmTip.style.top=Math.max(4,y)+'px';
+}
 function drawTreemap(){
   const el=document.getElementById('treemap'); if(!el) return;
   const W=el.clientWidth, H=el.clientHeight; if(W<10||H<10) return;
@@ -577,20 +669,27 @@ function drawTreemap(){
   const max=Math.max(...cells.map(c=>c.bytes));
   el.innerHTML='';
   for(const c of cells){
-    const t=c.bytes/max; const L=66-t*32; // bigger => deeper blue
-    const light=L>52;
+    const L=66-(c.bytes/max)*32, light=L>52;          // bigger => deeper blue
+    const rel=c.path?c.path.replace(DATA.home,'~'):'';
     const d=document.createElement('div'); d.className='cell';
-    d.style.left=c.x+'px'; d.style.top=c.y+'px'; d.style.width=c.w+'px'; d.style.height=c.h+'px';
-    d.style.background='hsl(212 68% '+L+'%)';
-    d.style.color=light?'#0a1a2f':'#fff';
-    d.style.textShadow=light?'none':'0 1px 2px rgba(0,0,0,.35)';
-    d.title=c.name+' — '+fmt(c.bytes);
-    if(c.w>62&&c.h>30) d.innerHTML='<div class="n">'+c.name+'</div><div class="s">'+fmt(c.bytes)+'</div>';
+    d.style.cssText='left:'+c.x+'px;top:'+c.y+'px;width:'+c.w+'px;height:'+c.h+'px;'
+      +'background:hsl(212 68% '+L+'%);color:'+(light?'#0a1a2f':'#fff')+';'
+      +'text-shadow:'+(light?'none':'0 1px 2px rgba(0,0,0,.35)');
+    d.setAttribute('aria-label', c.name+' '+rel+' '+fmt(c.bytes)+' '+pctOfHome(c.bytes));
+    if(c.w>62&&c.h>30){
+      let h='<div class="n">'+esc(c.name)+'</div>'
+           +'<div class="s">'+fmt(c.bytes)+' · '+pctOfHome(c.bytes)+'</div>';
+      if(rel&&c.w>120&&c.h>66) h+='<div class="p">'+esc(rel)+'</div>';
+      d.innerHTML=h;
+    }
+    d.addEventListener('mousemove',e=>showTip(e,c));
+    d.addEventListener('mouseleave',()=>{tmTip.style.display='none';});
     el.appendChild(d);
   }
 }
 drawTreemap();
 let rid; addEventListener('resize',()=>{clearTimeout(rid); rid=setTimeout(drawTreemap,150);});
+addEventListener('scroll',()=>{tmTip.style.display='none';},{passive:true});
 """
 
 
@@ -697,6 +796,43 @@ def render_html(d):
         p.append('<p class="note">Safe to delete in projects you are not actively building — '
                  "<code>npm install</code> rebuilds them.</p>")
 
+    # docker section (only when docker is installed)
+    dk = d.get("docker")
+    if dk:
+        p.append('<h2>🐳 Docker</h2><div class="panel dk">')
+        if dk.get("on_disk"):
+            p.append(f'<div class="disk">Disk image: <b>{human(dk["on_disk"])}</b> on disk '
+                     '<span class="path">~/Library/Containers/com.docker.docker/Data</span></div>')
+        if not dk.get("running"):
+            p.append('<p class="note">Docker isn\'t running — start Docker Desktop and re-scan to see '
+                     'the images, containers, and volumes breakdown.</p>')
+        else:
+            p.append("<table><thead><tr><th>Type</th><th>Active / total</th><th>Size</th>"
+                     "<th>Reclaimable</th></tr></thead><tbody>")
+            for r in dk.get("summary", []):
+                p.append(f'<tr><td>{esc(r.get("Type", ""))}</td>'
+                         f'<td>{esc(r.get("Active", "?"))} / {esc(r.get("TotalCount", "?"))}</td>'
+                         f'<td>{esc(r.get("Size", ""))}</td>'
+                         f'<td>{esc(r.get("Reclaimable", ""))}</td></tr>')
+            p.append("</tbody></table><div class='dk-cols'>")
+            p.append('<div><h3>Biggest containers</h3><ul class="dklist">')
+            for c in dk.get("containers", []) or [{"name": "No containers", "size": ""}]:
+                meta = esc(c.get("image", "")) + (f' · {esc(c["state"])}' if c.get("state") else "")
+                p.append(f'<li><span>{esc(c.get("name", ""))}'
+                         f'{f"<small>{meta}</small>" if meta else ""}</span>'
+                         f'<span class="sz">{esc(c.get("size", ""))}</span></li>')
+            p.append('</ul></div><div><h3>Biggest images</h3><ul class="dklist">')
+            for i in dk.get("images", []) or [{"name": "No images", "size": ""}]:
+                p.append(f'<li><span class="mono">{esc(i.get("name", ""))}</span>'
+                         f'<span class="sz">{esc(i.get("size", ""))}</span></li>')
+            p.append("</ul></div></div>")
+            p.append('<p class="tip">💡 Reclaim <b>inside</b> the VM: <code>docker system prune -a</code> '
+                     "(unused images, containers, networks) and <code>docker builder prune</code> "
+                     "(build cache). The disk image itself does not shrink automatically — after "
+                     "pruning, compact it in Docker Desktop → Settings → Resources → Advanced, or "
+                     "delete &amp; recreate the VM.</p>")
+        p.append("</div>")
+
     # safety footer
     p.append("<h2>Before you delete anything</h2>")
     p.append('<div class="panel warn"><div class="panel-in">')
@@ -719,7 +855,9 @@ def render_html(d):
              "<code>free</code> plugin.</p>")
 
     p.append('<script type="application/json" id="report-data">')
-    p.append(json.dumps(d)); p.append("</script><script>"); p.append(JS)
+    # escape < > & so a folder/container name can't break out of the <script> tag
+    p.append(json.dumps(d).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
+    p.append("</script><script>"); p.append(JS)
     p.append("</script></div></body></html>")
     return "".join(p)
 
@@ -741,6 +879,8 @@ def stdout_summary(d, report_path):
         "top_hotspots": [{"label": h["label"], "gb": gb(h["bytes"]), "safety": h["safety"],
                           "category": h["category"], "reclaim": h["reclaim"]}
                          for h in sorted(d["hotspots"], key=lambda h: -h["bytes"])[:12]],
+        "docker": ({"running": d["docker"]["running"], "on_disk_gb": gb(d["docker"].get("on_disk"))}
+                   if d.get("docker") else None),
         "scan": d["scan"],
     }
 
@@ -753,6 +893,13 @@ def selftest():
     assert human(1024) == "1 KB"
     assert human(5 * KB ** 3) == "5.0 GB"
     assert esc('<a href="x">&') == "&lt;a href=&quot;x&quot;&gt;&amp;"
+
+    # docker size parsing (used to rank images/containers)
+    assert parse_size("0B") == 0
+    assert parse_size("1.5GB") == 1.5e9
+    assert parse_size("1.2GB (virtual 3.4GB)") == 1.2e9
+    assert parse_size("2GiB") == 2 * 2 ** 30
+    assert parse_size("weird") == 0
 
     # du parsing + node_modules dedup (nested must not double count)
     fake = ("2048\t/h/a/node_modules\n"
@@ -809,12 +956,19 @@ def selftest():
         "node_modules": nm, "node_modules_total": nm[0]["bytes"], "node_modules_count": 1,
         "reclaimable": 2048 * KB, "summary": {"safe": 2048 * KB, "review": 0, "caution": 0},
         "snapshots": 0,
+        "docker": {"running": True, "on_disk": 103 * KB ** 3,
+                   "summary": [{"Type": "Images", "TotalCount": "10", "Active": "2",
+                                "Size": "30GB", "Reclaimable": "22GB (70%)"}],
+                   "containers": [{"name": "web", "size": "1.2GB (virtual 3GB)",
+                                   "image": "node:18", "state": "exited"}],
+                   "images": [{"name": "node:18", "size": "1.1GB"}]},
         "scan": {"depth": 6, "duration_s": 0.1, "timed_out": False, "fast": False, "errors": []},
     }
     out = render_html(sample)
     assert out.startswith("<!doctype html>")
     assert 'id="report-data"' in out and "squarify" in out
     assert 'class="drill"' in out and "old.dmg" in out and "+3 more" in out
+    assert "🐳 Docker" in out and "node:18" in out and "web" in out
 
     s = stdout_summary(sample, "x.html")
     assert s["report"] == "x.html"

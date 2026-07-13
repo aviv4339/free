@@ -31,6 +31,7 @@ Storage is expensive — especially on Apple hardware — so most people are alw
 | 🚦 **Safety tiers** | Every hotspot is tagged **Safe**, **Review**, or **Careful** — no guessing. |
 | 📋 **Curated catalog** | ~30 known macOS space hogs: Xcode, Homebrew, npm, Docker, caches, Trash, backups… |
 | 🔍 **Drill into any hotspot** | Expand a card to see the biggest folders *inside* it, exact paths, and a targeted tip. |
+| 🐳 **Docker breakdown** | If Docker is running, a dedicated section shows images / containers / volumes by size and what's reclaimable. |
 | 📦 **`node_modules` finder** | Totals every `node_modules` on disk, biggest first. |
 | 🧾 **Copy-paste commands** | The exact reclaim command for each safe item — one click to copy. |
 | 📄 **One self-contained file** | The report is a single HTML file: no server, no assets, no tracking. |
@@ -116,7 +117,8 @@ Plus a full **`node_modules`** sweep — safe to delete in any project you're no
 The generated HTML page is fully interactive and works offline:
 
 - **Disk gauge** — real capacity, used, and free (correct on APFS, where `df`'s own "used" column understates a full disk).
-- **Treemap** — a proportional map of your home folder; hover any cell for its exact size.
+- **Treemap** — a proportional map of your home folder; each cell shows its path and share of home, and hovering reveals the full location, size, and percentage.
+- **Docker section** — when Docker is running: a `docker system df` summary plus the biggest images and containers, and how much is reclaimable.
 - **Hotspot cards** — size, safety badge, a plain-English explanation, and a copy-to-clipboard reclaim command. Filter by tier, and **expand any card** to drill into the biggest folders *inside* that hotspot, with exact paths and a targeted cleanup tip.
 - **node_modules table** — every project, biggest first.
 - **Light & dark** — follows your system theme, with a manual toggle.

@@ -1,6 +1,6 @@
 {
   "name": "free",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Find what's eating your Mac's storage. Scans known macOS space hogs, explains what's safe to delete, and writes a beautiful interactive HTML report. Never deletes anything.",
   "author": {
     "name": "avive",
